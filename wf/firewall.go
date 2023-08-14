@@ -13,6 +13,7 @@ import (
 	"golang.org/x/sys/windows"
 	"inet.af/wf"
 	"tailscale.com/net/netaddr"
+	"tailscale.com/net/tsaddr"
 )
 
 // Known addresses.
@@ -466,26 +467,54 @@ func (f *Firewall) permitLoopback(w weight) error {
 }
 
 func (f *Firewall) permitDNS(w weight) error {
-	conditions := []*wf.Match{
-		{
-			Field: wf.FieldIPRemotePort,
-			Op:    wf.MatchTypeEqual,
-			Value: uint16(53),
-		},
-		// Repeat the condition type for logical OR.
-		{
-			Field: wf.FieldIPProtocol,
-			Op:    wf.MatchTypeEqual,
-			Value: wf.IPProtoUDP,
-		},
-		{
-			Field: wf.FieldIPProtocol,
-			Op:    wf.MatchTypeEqual,
-			Value: wf.IPProtoTCP,
-		},
+	// RW: only permit DNS to the Tailscale service (i.e. 100.100.100.100)
+	// to prevent DNS leaks (add any other DNS IPs to allow-list below)
+	dnsAddrs := []string{tsaddr.TailscaleServiceIPString, tsaddr.TailscaleServiceIPv6String}
+
+	var dnsConditions = func(remoteAddrs ...any) []*wf.Match {
+		conditions := []*wf.Match{
+            {
+                Field: wf.FieldIPRemotePort,
+                Op:    wf.MatchTypeEqual,
+                Value: uint16(53),
+            },
+            // Repeat the condition type for logical OR.
+            {
+                Field: wf.FieldIPProtocol,
+                Op:    wf.MatchTypeEqual,
+                Value: wf.IPProtoUDP,
+            },
+            {
+                Field: wf.FieldIPProtocol,
+                Op:    wf.MatchTypeEqual,
+                Value: wf.IPProtoTCP,
+            },
+		}
+		for _, a := range remoteAddrs {
+			conditions = append(conditions, &wf.Match{
+				Field: wf.FieldIPRemoteAddress,
+				Op:    wf.MatchTypeEqual,
+				Value: a,
+			})
+		}
+		return conditions
 	}
-	_, err := f.addRules("DNS", w, conditions, wf.ActionPermit, protocolAll, directionBoth)
-	return err
+
+    for _, a := range dnsAddrs {
+        addr := netip.MustParseAddr(a)
+        cond := dnsConditions(addr)
+        var p protocol
+        if addr.Is4() {
+            p = protocolV4
+        } else {
+            p = protocolV6
+        }
+        _, err := f.addRules("DNS", w, cond, wf.ActionPermit, p, directionBoth)
+        if err != nil {
+            return err
+        }
+    }
+	return nil
 }
 
 func (f *Firewall) permitTailscaleService(w weight) error {
